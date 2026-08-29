@@ -29,6 +29,16 @@ export class Camera {
 
   setPosition(x: number, y: number, z: number) {
     this.camera.position.set(x, y, z);
+
+    // Keep the orbit state in step with the explicit position so the first
+    // right-drag turns the camera instead of snapping it somewhere else.
+    const dx = x - this.target.x;
+    const dy = y - this.target.y;
+    const dz = z - this.target.z;
+    this.distance = Math.max(this.minDistance, Math.min(this.maxDistance, Math.hypot(dx, dy, dz)));
+    this.phi = Math.max(this.minPhi, Math.min(this.maxPhi, Math.acos(dy / this.distance)));
+    this.theta = Math.atan2(dx, dz);
+
     this.camera.lookAt(this.target);
   }
 

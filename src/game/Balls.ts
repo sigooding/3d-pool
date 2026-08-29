@@ -1,6 +1,24 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { Physics } from './Physics';
+import {
+  CENTRE_LINE_X,
+  CUE_BALL_START,
+  FOOT_SPOT_X,
+  POCKETS,
+  REST_Y,
+  TABLE,
+} from './TableSpec';
+
+/** Deceleration of a rolling ball on the cloth, metres per second squared. */
+const CLOTH_DECELERATION = 0.1;
+/**
+ * Extra bite at walking pace. Without it a break spreads nicely but then takes
+ * half a minute to die; with it the last few centimetres of roll end promptly
+ * without noticeably shortening a fast ball's travel.
+ */
+const SETTLE_DECELERATION = 1.1;
+const SETTLE_SPEED = 0.35;
 
 export interface Ball {
   mesh: THREE.Mesh;
@@ -10,16 +28,35 @@ export interface Ball {
   pocketed: boolean;
 }
 
+/** Per-shot state, reset by `beginShot()`. */
+interface ShotState {
+  /** Type of the first object ball the cue ball touched, if any. */
+  firstContact: Ball['type'] | null;
+  /** Whether any ball has touched a cushion since the shot began. */
+  cushionHit: boolean;
+  /** Object balls that have crossed the centre line since the shot began. */
+  overCentreLine: Set<Ball>;
+  /** Object balls that have reached a cushion since the shot began. */
+  toCushion: Set<Ball>;
+  /** Side of the centre line (sign of x) each ball started the shot on. */
+  startSide: Map<Ball, number>;
+}
+
 export class Balls {
   private scene: THREE.Scene;
   private physics: Physics;
   private balls: Ball[] = [];
-  private ballRadius = 0.025;
-  private tableHeight = 0.825;
-  private pocketRadius = 0.12;
-  private pocketPositions: { x: number; z: number }[] = [];
-  private cushionHitDetected = false;
-  private lastCushionCheck = 0;
+  private ballRadius = TABLE.ballRadius;
+  private pocketRadius = TABLE.pocketRadius;
+  private pocketPositions = POCKETS;
+  private bodyToBall = new Map<CANNON.Body, Ball>();
+  private shot: ShotState = {
+    firstContact: null,
+    cushionHit: false,
+    overCentreLine: new Set(),
+    toCushion: new Set(),
+    startSide: new Map(),
+  };
 
   // Ultimate Pool ball colors reference
   // Red balls: 0xCC0000, Yellow balls: 0xFFD700, Eight ball: 0x111111, Cue: 0xFFFFF0
@@ -27,70 +64,47 @@ export class Balls {
   constructor(scene: THREE.Scene, physics: Physics) {
     this.scene = scene;
     this.physics = physics;
-    this.pocketPositions = [
-      { x: -2.38, z: -1.18 },
-      { x: 2.38, z: -1.18 },
-      { x: -2.38, z: 1.18 },
-      { x: 2.38, z: 1.18 },
-      { x: 0, z: -1.18 },
-      { x: 0, z: 1.18 },
-    ];
   }
 
+  /**
+   * Rack the balls for a UK/International pool frame.
+   *
+   * The triangle is laid out along the long axis of the table (X) with the
+   * apex ball on the foot spot (-X side) and the rows opening away from the
+   * breaker, so the cue ball - which starts behind the baulk line at +X -
+   * meets the apex first.
+   */
   rackBalls() {
-    // Create cue ball
-    this.createBall('cue', 0, this.tableHeight, 1.5, 0);
+    // Cue ball: behind the baulk line, on the string.
+    this.createBall('cue', CUE_BALL_START.x, REST_Y, CUE_BALL_START.z, 0);
 
-    // Rack formation for UK pool (triangle)
-    const rackX = 0;
-    const rackZ = -1.0;
-    const spacing = this.ballRadius * 2.05;
+    const spacing = this.ballRadius * 2.05; // a hair more than a diameter: no starting overlap
+    const rowGap = (spacing * Math.sqrt(3)) / 2; // 60° stagger between rows
 
-    // Ball arrangement in triangle (5 rows)
-    const rackPositions = [
-      // Row 1 (front - apex)
-      { row: 0, col: 0 },
-      // Row 2
-      { row: 1, col: -0.5 },
-      { row: 1, col: 0.5 },
-      // Row 3
-      { row: 2, col: -1 },
-      { row: 2, col: 0 },
-      { row: 2, col: 1 },
-      // Row 4
-      { row: 3, col: -1.5 },
-      { row: 3, col: -0.5 },
-      { row: 3, col: 0.5 },
-      { row: 3, col: 1.5 },
-      // Row 5 (back)
-      { row: 4, col: -2 },
-      { row: 4, col: -1 },
-      { row: 4, col: 0 },
-      { row: 4, col: 1 },
-      { row: 4, col: 2 },
+    // Row 0 is the apex (nearest the cue ball), row 4 the back of the pack.
+    // The 8-ball sits dead centre of the third row; the two back corners are
+    // one red and one yellow, as the rules require.
+    const rack: string[][] = [
+      ['red1'],
+      ['yellow1', 'red2'],
+      ['yellow2', 'eight', 'red3'],
+      ['red4', 'yellow3', 'red5', 'yellow4'],
+      ['red6', 'yellow5', 'red7', 'yellow6', 'yellow7'],
     ];
 
-    // Ball order in rack (Ultimate Pool style - 8-ball in center)
-    const ballOrder = [
-      'red1',      // Apex
-      'yellow1', 'red2',
-      'eight', 'red3', 'yellow2',  // 8-ball in center of row 3
-      'yellow3', 'red4', 'yellow4', 'red5',
-      'red6', 'yellow5', 'red7', 'yellow6', 'yellow7',
-    ];
+    rack.forEach((row, rowIndex) => {
+      row.forEach((ballId, i) => {
+        const x = FOOT_SPOT_X - rowIndex * rowGap;
+        const z = (i - (row.length - 1) / 2) * spacing;
 
-    rackPositions.forEach((pos, index) => {
-      const x = rackX + pos.col * spacing;
-      const z = rackZ - pos.row * spacing * 0.866; // sqrt(3)/2 for triangle
-      const ballType = ballOrder[index];
-
-      if (ballType.startsWith('red')) {
-        this.createBall('red', x, this.tableHeight, z, parseInt(ballType.replace('red', '')));
-      } else if (ballType.startsWith('yellow')) {
-        this.createBall('yellow', x, this.tableHeight, z, parseInt(ballType.replace('yellow', '')));
-      } else if (ballType === 'eight') {
-        this.createBall('eight', x, this.tableHeight, z, 8);
-      }
+        if (ballId === 'eight') {
+          this.createBall('eight', x, REST_Y, z, 8);
+        } else if (ballId.startsWith('red')) {
+          this.createBall('red', x, REST_Y, z, parseInt(ballId.replace('red', ''), 10));
+        } else {
+          this.createBall('yellow', x, REST_Y, z, parseInt(ballId.replace('yellow', ''), 10));
+        }
+      });
     });
   }
 
@@ -142,34 +156,52 @@ export class Balls {
 
     // Create physics body
     const body = new CANNON.Body({
-      mass: 0.17, // Standard pool ball mass
+      mass: TABLE.ballMass, // Standard pool ball mass
       shape: new CANNON.Sphere(this.ballRadius),
       material: this.physics.getBallMaterial(),
-      linearDamping: 0.35,
-      angularDamping: 0.4,
+      linearDamping: 0.05,
+      angularDamping: 0.2,
     });
     body.position.set(x, y, z);
     body.allowSleep = true;
-    body.sleepSpeedLimit = 0.02;
-    body.sleepTimeLimit = 0.3;
-    
-    // Add collision handling
-    body.addEventListener('collide', () => {
-      // Collision effects handled elsewhere
-    });
+    body.sleepSpeedLimit = 0.03;
+    body.sleepTimeLimit = 0.25;
 
     this.physics.world.addBody(body);
 
-    const ball: Ball = {
-      mesh,
-      body,
-      type,
-      number,
-      pocketed: false,
-    };
+    const ball: Ball = { mesh, body, type, number, pocketed: false };
+
+    // Track contacts so shot legality can be decided from real collisions
+    // rather than from sampled positions.
+    this.bodyToBall.set(body, ball);
+    body.addEventListener('collide', (event: { body: CANNON.Body }) => {
+      this.onCollide(ball, event.body);
+    });
 
     this.balls.push(ball);
     return ball;
+  }
+
+  private onCollide(ball: Ball, other: CANNON.Body) {
+    if (this.physics.isCushion(other)) {
+      this.shot.cushionHit = true;
+      if (ball.type !== 'cue') {
+        this.shot.toCushion.add(ball);
+      }
+      return;
+    }
+
+    const otherBall = this.bodyToBall.get(other);
+    if (!otherBall || otherBall.pocketed || ball.pocketed) return;
+
+    // First contact: the cue ball touching an object ball.
+    if (!this.shot.firstContact) {
+      if (ball.type === 'cue' && otherBall.type !== 'cue') {
+        this.shot.firstContact = otherBall.type;
+      } else if (otherBall.type === 'cue' && ball.type !== 'cue') {
+        this.shot.firstContact = ball.type;
+      }
+    }
   }
 
   private addNumberToBall(mesh: THREE.Mesh, number: number, type: Ball['type']) {
@@ -254,13 +286,82 @@ export class Balls {
     material.needsUpdate = true;
   }
 
+  /**
+   * Cloth rolling resistance: a constant deceleration, which is how a real
+   * ball loses speed on the baize. Cannon's exponential damping alone either
+   * kills a break within a metre or lets it roll forever.
+   */
+  applyClothFriction(dt: number) {
+    this.balls.forEach(ball => {
+      if (ball.pocketed) return;
+
+      const v = ball.body.velocity;
+      const speed = Math.sqrt(v.x * v.x + v.z * v.z);
+      if (speed < 1e-4) return;
+
+      const settle =
+        speed < SETTLE_SPEED ? SETTLE_DECELERATION * (1 - speed / SETTLE_SPEED) : 0;
+      const scale = Math.max(0, speed - (CLOTH_DECELERATION + settle) * dt) / speed;
+      v.x *= scale;
+      v.z *= scale;
+      // Keep the roll in step with the (reduced) linear speed, otherwise the
+      // contact friction simply accelerates the ball back up again.
+      ball.body.angularVelocity.scale(scale, ball.body.angularVelocity);
+    });
+  }
+
   update() {
     this.balls.forEach(ball => {
-      if (!ball.pocketed) {
-        ball.mesh.position.copy(ball.body.position as unknown as THREE.Vector3);
-        ball.mesh.quaternion.copy(ball.body.quaternion as unknown as THREE.Quaternion);
+      if (ball.pocketed) return;
+
+      ball.mesh.position.copy(ball.body.position as unknown as THREE.Vector3);
+      ball.mesh.quaternion.copy(ball.body.quaternion as unknown as THREE.Quaternion);
+
+      // Break rule: count object balls that cross the centre line.
+      if (ball.type !== 'cue' && !this.shot.overCentreLine.has(ball)) {
+        const startSide = this.shot.startSide.get(ball);
+        if (startSide !== undefined) {
+          const nowSide = Math.sign(ball.body.position.x - CENTRE_LINE_X);
+          if (nowSide !== 0 && nowSide !== startSide) {
+            this.shot.overCentreLine.add(ball);
+          }
+        }
       }
     });
+  }
+
+  /** Clear the per-shot contact bookkeeping. Call just before striking the cue ball. */
+  beginShot() {
+    this.shot.firstContact = null;
+    this.shot.cushionHit = false;
+    this.shot.overCentreLine.clear();
+    this.shot.toCushion.clear();
+    this.shot.startSide.clear();
+    this.balls.forEach(ball => {
+      if (!ball.pocketed) {
+        this.shot.startSide.set(ball, Math.sign(ball.body.position.x - CENTRE_LINE_X));
+      }
+    });
+  }
+
+  /** Type of the first object ball the cue ball touched this shot (null if none). */
+  getFirstContact(): Ball['type'] | null {
+    return this.shot.firstContact;
+  }
+
+  /** Whether any ball has touched a cushion since the shot began. */
+  hasCushionHit(): boolean {
+    return this.shot.cushionHit;
+  }
+
+  /** How many object balls have crossed the centre line this shot. */
+  getBallsOverCentreLine(): number {
+    return this.shot.overCentreLine.size;
+  }
+
+  /** How many object balls have reached a cushion this shot. */
+  getBallsToCushion(): number {
+    return this.shot.toCushion.size;
   }
 
   checkPockets(): { ball: Ball; type: string }[] {
@@ -291,69 +392,16 @@ export class Balls {
     return pocketed;
   }
 
-  checkFirstContact(): string | null {
-    const cueBall = this.getCueBall();
-    if (!cueBall) return null;
-
-    // Check if cue ball is close to any other ball
-    for (const ball of this.balls) {
-      if (ball.type === 'cue' || ball.pocketed) continue;
-
-      const dx = cueBall.body.position.x - ball.body.position.x;
-      const dz = cueBall.body.position.z - ball.body.position.z;
-      const distance = Math.sqrt(dx * dx + dz * dz);
-
-      if (distance < this.ballRadius * 2.1) {
-        return ball.type;
-      }
-    }
-    return null;
-  }
-
-  checkCushionHit(): boolean {
-    const now = Date.now();
-    if (now - this.lastCushionCheck < 100) return this.cushionHitDetected;
-    this.lastCushionCheck = now;
-
-    const tableBounds = {
-      minX: -2.35,
-      maxX: 2.35,
-      minZ: -1.15,
-      maxZ: 1.15,
-    };
-
-    this.cushionHitDetected = false;
-
-    for (const ball of this.balls) {
-      if (ball.pocketed) continue;
-
-      const pos = ball.body.position;
-      const vel = ball.body.velocity;
-      const speed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
-
-      if (speed < 0.1) continue;
-
-      // Check if near cushion and moving towards it
-      if (
-        (pos.x <= tableBounds.minX + 0.05 && vel.x < 0) ||
-        (pos.x >= tableBounds.maxX - 0.05 && vel.x > 0) ||
-        (pos.z <= tableBounds.minZ + 0.05 && vel.z < 0) ||
-        (pos.z >= tableBounds.maxZ - 0.05 && vel.z > 0)
-      ) {
-        this.cushionHitDetected = true;
-        break;
-      }
-    }
-
-    return this.cushionHitDetected;
-  }
-
   getCueBall(): Ball | undefined {
     return this.balls.find(b => b.type === 'cue');
   }
 
   getAllBalls(): Ball[] {
     return this.balls.filter(b => !b.pocketed);
+  }
+
+  getBall(type: Ball['type'], number?: number): Ball | undefined {
+    return this.balls.find(b => b.type === type && (number === undefined || b.number === number));
   }
 
   resetVelocities() {
@@ -391,15 +439,44 @@ export class Balls {
 
     cueBall.pocketed = false;
     cueBall.mesh.visible = true;
-    cueBall.body.position.set(position.x, this.tableHeight, position.z);
+    cueBall.body.position.set(position.x, REST_Y, position.z);
     cueBall.body.velocity.set(0, 0, 0);
     cueBall.body.angularVelocity.set(0, 0, 0);
     cueBall.body.wakeUp();
   }
 
+  /**
+   * Put a pocketed ball back on the table, on the foot spot, or as close to it
+   * as is free (walked back towards the foot rail). Used when the 8-ball is
+   * potted on the break.
+   */
+  respotOnFootSpot(type: Ball['type']): boolean {
+    const ball = this.balls.find(b => b.type === type && b.pocketed);
+    if (!ball) return false;
+
+    const probe = new THREE.Vector3();
+    let x = FOOT_SPOT_X;
+    for (let i = 0; i < 40; i++) {
+      probe.set(x, REST_Y, 0);
+      if (this.canPlaceCueBallAt(probe)) break;
+      x -= this.ballRadius * 2.2;
+    }
+
+    ball.pocketed = false;
+    ball.mesh.visible = true;
+    ball.mesh.position.set(x, REST_Y, 0);
+    ball.body.position.set(x, REST_Y, 0);
+    ball.body.velocity.set(0, 0, 0);
+    ball.body.angularVelocity.set(0, 0, 0);
+    ball.body.quaternion.set(0, 0, 0, 1);
+    ball.body.wakeUp();
+    return true;
+  }
+
   removeBall(ball: Ball) {
     this.scene.remove(ball.mesh);
     this.physics.world.removeBody(ball.body);
+    this.bodyToBall.delete(ball.body);
     const index = this.balls.indexOf(ball);
     if (index > -1) {
       this.balls.splice(index, 1);
@@ -408,8 +485,7 @@ export class Balls {
 
   removeAll() {
     while (this.balls.length > 0) {
-      const ball = this.balls[0];
-      this.removeBall(ball);
+      this.removeBall(this.balls[0]);
     }
   }
 

@@ -6,6 +6,28 @@ import { Physics } from './Physics';
 import { Camera } from './Camera';
 import { Controls } from './Controls';
 import { Rules } from './Rules';
+import {
+  BAULK_LINE_X,
+  HALF_LENGTH,
+  HALF_WIDTH,
+  REST_Y,
+  TABLE,
+} from './TableSpec';
+
+/** How long the player holds the mouse for a full power shot, milliseconds. */
+const SHOT_CHARGE_MS = 2500;
+/** Cue ball rolling speed at full power, metres per second. */
+const MAX_SHOT_SPEED = 8;
+/**
+ * Cannon's contact friction turns the struck cue ball into a roll within a
+ * single step, which costs roughly 40% of its speed. The impulse is scaled up
+ * so the cue ball actually leaves the tip at `MAX_SHOT_SPEED`.
+ */
+const STRIKE_COMPENSATION = 1.65;
+/** Balls slower than this count as stopped, metres per second. */
+const SETTLE_SPEED = 0.08;
+/** Give up waiting for the balls to stop after this long, milliseconds. */
+const SETTLE_TIMEOUT_MS = 15000;
 
 export interface GameState {
   currentPlayer: number;
@@ -34,7 +56,6 @@ export class PoolGame {
   private camera!: Camera;
   private controls!: Controls;
   private physics!: Physics;
-  private table!: Table;
   private balls!: Balls;
   private rules!: Rules;
   private cueMesh!: THREE.Group;
@@ -44,16 +65,17 @@ export class PoolGame {
   private isMouseDown = false;
   private mouseDownTime = 0;
   private power = 0;
-  private maxPower = 15;
+  private maxShotSpeed = MAX_SHOT_SPEED;
+  private shotStartTime = 0;
   private isShooting = false;
   private ballsMoving = false;
   private cueBallPocketed = false;
   private firstContactMade = false;
+  private firstContactType: 'cue' | 'red' | 'yellow' | 'eight' | null = null;
   private cushionHitAfterContact = false;
   private anyBallHitCushion = false;
   private shotBallsPocketed: string[] = [];
   private ballInHandMode = false;
-  private baulkLineZ = 0;
 
   constructor(canvas: HTMLCanvasElement, updateState: (state: Partial<GameState>) => void) {
     this.canvas = canvas;
@@ -220,8 +242,9 @@ export class PoolGame {
 
   private setupCamera() {
     this.camera = new Camera(this.canvas);
-    this.camera.setPosition(0, 3, 4);
-    this.camera.lookAt(0, 0, 0);
+    // Stand behind the baulk end of the table so the break is played away from you.
+    this.camera.setPosition(HALF_LENGTH + 1.6, 3.1, 2.9);
+    this.camera.lookAt(0, TABLE.bedTopY, 0);
   }
 
   private setupControls() {
@@ -230,11 +253,11 @@ export class PoolGame {
 
   private setupPhysics() {
     this.physics = new Physics();
-    this.baulkLineZ = 1.5;
   }
 
   private setupTable() {
-    this.table = new Table(this.scene, this.physics);
+    // The table adds its own meshes to the scene; physics bodies live in Physics.
+    new Table(this.scene, this.physics);
   }
 
   private setupBalls() {
@@ -245,8 +268,11 @@ export class PoolGame {
   private setupCue() {
     this.cueMesh = new THREE.Group();
 
+    // The cue is built along -Z: the tip sits just behind the ball (the ball
+    // sits at this group's origin) and the butt extends away from the shot.
+
     // Cue butt (handle end)
-    const buttGeometry = new THREE.CylinderGeometry(0.015, 0.018, 0.8, 8);
+    const buttGeometry = new THREE.CylinderGeometry(0.014, 0.018, 0.45, 8);
     const buttMaterial = new THREE.MeshStandardMaterial({
       color: 0x2a1810,
       roughness: 0.4,
@@ -254,10 +280,10 @@ export class PoolGame {
     });
     const butt = new THREE.Mesh(buttGeometry, buttMaterial);
     butt.rotation.x = Math.PI / 2;
-    butt.position.z = -2.5;
+    butt.position.z = -1.2;
 
     // Cue shaft (main body)
-    const shaftGeometry = new THREE.CylinderGeometry(0.01, 0.015, 1.5, 8);
+    const shaftGeometry = new THREE.CylinderGeometry(0.01, 0.014, 0.85, 8);
     const shaftMaterial = new THREE.MeshStandardMaterial({
       color: 0xDEB887,
       roughness: 0.3,
@@ -265,17 +291,17 @@ export class PoolGame {
     });
     const shaft = new THREE.Mesh(shaftGeometry, shaftMaterial);
     shaft.rotation.x = Math.PI / 2;
-    shaft.position.z = -1.5;
+    shaft.position.z = -0.53;
 
     // Wrap/grip area
-    const wrapGeometry = new THREE.CylinderGeometry(0.016, 0.016, 0.3, 8);
+    const wrapGeometry = new THREE.CylinderGeometry(0.016, 0.016, 0.25, 8);
     const wrapMaterial = new THREE.MeshStandardMaterial({
       color: 0x111111,
       roughness: 0.8,
     });
     const wrap = new THREE.Mesh(wrapGeometry, wrapMaterial);
     wrap.rotation.x = Math.PI / 2;
-    wrap.position.z = -2.1;
+    wrap.position.z = -1.3;
 
     // Joint ring
     const jointGeometry = new THREE.CylinderGeometry(0.013, 0.013, 0.02, 8);
@@ -286,7 +312,7 @@ export class PoolGame {
     });
     const joint = new THREE.Mesh(jointGeometry, jointMaterial);
     joint.rotation.x = Math.PI / 2;
-    joint.position.z = -1.8;
+    joint.position.z = -0.965;
 
     // Cue tip
     const tipGeometry = new THREE.CylinderGeometry(0.011, 0.01, 0.04, 8);
@@ -296,7 +322,7 @@ export class PoolGame {
     });
     const tip = new THREE.Mesh(tipGeometry, tipMaterial);
     tip.rotation.x = Math.PI / 2;
-    tip.position.z = -0.25;
+    tip.position.z = -0.055;
 
     // Cue ferrule (white part near tip)
     const ferruleGeometry = new THREE.CylinderGeometry(0.011, 0.011, 0.03, 8);
@@ -307,7 +333,7 @@ export class PoolGame {
     });
     const ferrule = new THREE.Mesh(ferruleGeometry, ferruleMaterial);
     ferrule.rotation.x = Math.PI / 2;
-    ferrule.position.z = -0.28;
+    ferrule.position.z = -0.09;
 
     this.cueMesh.add(butt, shaft, wrap, joint, tip, ferrule);
     this.cueMesh.visible = false;
@@ -414,7 +440,7 @@ export class PoolGame {
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, this.camera.getCamera());
 
-    const tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.025);
+    const tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -REST_Y);
     const intersection = new THREE.Vector3();
     raycaster.ray.intersectPlane(tablePlane, intersection);
 
@@ -426,7 +452,9 @@ export class PoolGame {
       const angle = Math.atan2(direction.x, direction.z);
       this.cueMesh.rotation.y = angle;
       this.cueMesh.position.copy(cueBall.mesh.position);
-      this.cueMesh.position.y = 0.025;
+      this.cueMesh.position.y = REST_Y;
+      this.cueMesh.visible = true;
+      this.aimLine.visible = true;
 
       // Update aim line with ghost ball prediction
       this.updateAimLine(cueBall, direction, angle);
@@ -439,42 +467,36 @@ export class PoolGame {
     // Create aim line points
     const points: THREE.Vector3[] = [];
     const startPoint = cueBall.mesh.position.clone();
-    startPoint.y = 0.026;
-    
+    startPoint.y = REST_Y + 0.001;
+
     points.push(startPoint.clone());
-    
+
     // Cast ray to find first ball hit
     const raycaster = new THREE.Raycaster(
-      startPoint.clone().setY(0.025),
+      startPoint.clone().setY(REST_Y),
       direction.clone().setY(0).normalize(),
       0,
       8
     );
-    
+
     const ballMeshes = this.balls.getAllBalls()
       .filter(b => b.type !== 'cue')
       .map(b => b.mesh);
-    
+
     const intersects = raycaster.intersectObjects(ballMeshes);
-    
+
     if (intersects.length > 0) {
-      const hitPoint = intersects[0].point;
-      points.push(hitPoint.clone().setY(0.026));
-      
-      // Add ghost ball indicator
-      const ghostBallPos = hitPoint.clone();
-      ghostBallPos.y = 0.025;
-      
-      // Update aim line geometry
-      this.aimLine.geometry.setFromPoints(points);
+      // Stop the line at the ball it would strike
+      points.push(intersects[0].point.clone().setY(REST_Y + 0.001));
     } else {
       // No ball hit, extend line to cushion
       const endPoint = startPoint.clone().add(direction.clone().multiplyScalar(8));
-      endPoint.y = 0.026;
+      endPoint.y = REST_Y + 0.001;
       points.push(endPoint);
-      this.aimLine.geometry.setFromPoints(points);
     }
-    
+
+    this.aimLine.geometry.setFromPoints(points);
+    this.aimLine.computeLineDistances();
     this.aimLine.position.set(0, 0, 0);
     this.aimLine.rotation.y = 0;
   }
@@ -484,30 +506,34 @@ export class PoolGame {
     if (!cueBall) return;
 
     const holdDuration = Date.now() - this.mouseDownTime;
-    this.power = Math.min((holdDuration / 1000) * 30, this.maxPower);
+    this.power = Math.min((holdDuration / SHOT_CHARGE_MS) * 100, 100);
 
-    if (this.power < 1) return;
+    if (this.power < 2) return;
 
     this.isShooting = true;
     this.ballsMoving = true;
+    this.shotStartTime = Date.now();
     this.firstContactMade = false;
+    this.firstContactType = null;
     this.cushionHitAfterContact = false;
     this.anyBallHitCushion = false;
     this.shotBallsPocketed = [];
     this.cueBallPocketed = false;
+    this.balls.beginShot();
 
     // Hide cue
     this.cueMesh.visible = false;
     this.aimLine.visible = false;
 
-    // Apply force to cue ball
+    // Strike the cue ball along the aim direction. The cue stick points
+    // backwards from the ball, so the impulse uses +sin/+cos, not -sin/-cos.
     const angle = this.cueMesh.rotation.y;
-    const force = new CANNON.Vec3(
-      -Math.sin(angle) * this.power,
-      0,
-      -Math.cos(angle) * this.power
+    const speed = (this.power / 100) * this.maxShotSpeed * STRIKE_COMPENSATION;
+    const impulse = speed * TABLE.ballMass;
+    cueBall.body.wakeUp();
+    cueBall.body.applyImpulse(
+      new CANNON.Vec3(Math.sin(angle) * impulse, 0, Math.cos(angle) * impulse)
     );
-    cueBall.body.applyImpulse(force);
 
     // Play hit sound effect (visual feedback)
     this.showShotFeedback();
@@ -640,19 +666,19 @@ export class PoolGame {
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, this.camera.getCamera());
 
-    const tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.025);
+    const tablePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -REST_Y);
     const intersection = new THREE.Vector3();
     raycaster.ray.intersectPlane(tablePlane, intersection);
 
     if (intersection) {
-      // Check if position is in baulk (behind baulk line)
-      const tableBounds = this.table.getBounds();
-      if (
-        intersection.x > tableBounds.minX + 0.1 &&
-        intersection.x < tableBounds.maxX - 0.1 &&
-        intersection.z > this.baulkLineZ &&
-        intersection.z < tableBounds.maxZ - 0.1
-      ) {
+      // The cue ball may only be placed behind the baulk line (the +X end of the table)
+      const margin = TABLE.ballRadius + 0.02;
+      const inBaulk =
+        intersection.x > BAULK_LINE_X + margin &&
+        intersection.x < HALF_LENGTH - margin &&
+        Math.abs(intersection.z) < HALF_WIDTH - margin;
+
+      if (inBaulk) {
         // Check no collision with other balls
         const canPlace = this.balls.canPlaceCueBallAt(intersection);
         if (canPlace) {
@@ -675,7 +701,7 @@ export class PoolGame {
 
   private checkBallsStopped() {
     const allBalls = this.balls.getAllBalls();
-    const threshold = 0.05;
+    const threshold = SETTLE_SPEED;
 
     for (const ball of allBalls) {
       const velocity = ball.body.velocity;
@@ -692,16 +718,24 @@ export class PoolGame {
   private handleShotResult() {
     const result = this.rules.evaluateShot({
       firstContactMade: this.firstContactMade,
+      firstContactType: this.firstContactType,
       cushionHitAfterContact: this.cushionHitAfterContact,
       anyBallHitCushion: this.anyBallHitCushion,
       ballsPocketed: this.shotBallsPocketed,
       cueBallPocketed: this.cueBallPocketed,
+      ballsOverCentreLine: this.balls.getBallsOverCentreLine(),
+      ballsToCushion: this.balls.getBallsToCushion(),
       isBreak: this.rules.isBreakShot(),
       currentPlayer: this.rules.getCurrentPlayer(),
       player1Group: this.rules.getPlayerGroup(1),
       player2Group: this.rules.getPlayerGroup(2),
       tableOpen: this.rules.isTableOpen(),
     });
+
+    // The 8-ball potted on the break goes back on the foot spot
+    if (result.respotEight) {
+      this.balls.respotOnFootSpot('eight');
+    }
 
     // Update groups if needed
     if (result.assignGroup) {
@@ -770,7 +804,8 @@ export class PoolGame {
   private animate = () => {
     this.animationId = requestAnimationFrame(this.animate);
 
-    // Update physics
+    // Update physics (cloth friction first, then the solver)
+    this.balls.applyClothFriction(1 / 60);
     this.physics.step();
 
     // Update ball positions
@@ -791,30 +826,31 @@ export class PoolGame {
             return Math.sqrt(dx * dx + dz * dz) < 0.2;
           });
           if (pocketPos) {
-            this.showPocketEffect(new THREE.Vector3(pocketPos.x, 0.8, pocketPos.z));
+            this.showPocketEffect(new THREE.Vector3(pocketPos.x, REST_Y, pocketPos.z));
           }
         }
       }
     }
 
-    // Check ball collisions for first contact
-    if (!this.firstContactMade) {
-      const contact = this.balls.checkFirstContact();
-      if (contact) {
-        this.firstContactMade = true;
-      }
+    // First contact, straight from the physics contact events
+    const contact = this.balls.getFirstContact();
+    if (contact && !this.firstContactMade) {
+      this.firstContactMade = true;
+      this.firstContactType = contact;
     }
 
-    // Check cushion hits
-    if (this.balls.checkCushionHit()) {
+    // Cushion hits, also from contact events
+    if (this.balls.hasCushionHit()) {
       this.anyBallHitCushion = true;
       if (this.firstContactMade) {
         this.cushionHitAfterContact = true;
       }
     }
 
-    // Check if balls have stopped
-    if (this.ballsMoving && this.checkBallsStopped()) {
+    // Check if balls have stopped (with a timeout so a never-ending roll
+    // can't leave the game waiting forever)
+    const settleTimedOut = Date.now() - this.shotStartTime > SETTLE_TIMEOUT_MS;
+    if (this.ballsMoving && (this.checkBallsStopped() || settleTimedOut)) {
       this.ballsMoving = false;
       this.isShooting = false;
 
@@ -831,7 +867,7 @@ export class PoolGame {
           this.cueMesh.visible = true;
           this.aimLine.visible = true;
           this.cueMesh.position.copy(cueBall.mesh.position);
-          this.cueMesh.position.y = 0.025;
+          this.cueMesh.position.y = REST_Y;
         }
       }
     }
@@ -839,20 +875,24 @@ export class PoolGame {
     // Update power while holding
     if (this.isMouseDown && !this.ballsMoving) {
       const holdDuration = Date.now() - this.mouseDownTime;
-      this.power = Math.min((holdDuration / 1000) * 30, this.maxPower);
-      const powerPercent = (this.power / this.maxPower) * 100;
-      
-      let shotStrength = 'Tap';
-      if (powerPercent > 80) shotStrength = 'POWER!';
-      else if (powerPercent > 60) shotStrength = 'Hard';
-      else if (powerPercent > 40) shotStrength = 'Medium';
-      else if (powerPercent > 20) shotStrength = 'Soft';
-      
-      this.updateState({ power: powerPercent, shotStrength });
+      this.power = Math.min((holdDuration / SHOT_CHARGE_MS) * 100, 100);
 
-      // Animate cue pullback
-      const pullback = (this.power / this.maxPower) * 0.5;
-      this.cueMesh.position.z += pullback * 0.01;
+      let shotStrength = 'Tap';
+      if (this.power > 80) shotStrength = 'POWER!';
+      else if (this.power > 60) shotStrength = 'Hard';
+      else if (this.power > 40) shotStrength = 'Medium';
+      else if (this.power > 20) shotStrength = 'Soft';
+
+      this.updateState({ power: this.power, shotStrength });
+
+      // Animate cue pullback: the cue withdraws along its own axis, away from the ball
+      const cueBall = this.balls.getCueBall();
+      if (cueBall) {
+        const pullback = (this.power / 100) * 0.25;
+        this.cueMesh.position.copy(cueBall.mesh.position);
+        this.cueMesh.position.y = REST_Y;
+        this.cueMesh.translateZ(-pullback);
+      }
     }
 
     // Render
@@ -866,6 +906,14 @@ export class PoolGame {
     this.isShooting = false;
     this.ballsMoving = false;
     this.ballInHandMode = false;
+    this.power = 0;
+    this.shotBallsPocketed = [];
+    this.firstContactMade = false;
+    this.firstContactType = null;
+    this.cushionHitAfterContact = false;
+    this.anyBallHitCushion = false;
+    this.cueBallPocketed = false;
+    this.balls.beginShot();
     this.cueMesh.visible = false;
     this.aimLine.visible = false;
     this.updateState({

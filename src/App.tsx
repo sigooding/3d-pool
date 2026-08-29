@@ -337,7 +337,7 @@ function App() {
             <h2 className="text-2xl font-bold text-yellow-400 mb-4">UK International Pool Rules</h2>
             <div className="text-gray-300 space-y-3 text-sm">
               <p><strong className="text-white">Objective:</strong> Pot all 7 balls of your group (red or yellow), then legally pot the 8-ball (black).</p>
-              <p><strong className="text-white">Break:</strong> Minimum 3 points required (1 point per ball potted + 1 per ball crossing the center line).</p>
+              <p><strong className="text-white">Break:</strong> Legal if you pot a ball or drive at least 3 object balls to a cushion. Anything less is a foul.</p>
               <p><strong className="text-white">Groups:</strong> Not decided on the break. First legally potted ball after break determines groups.</p>
               <p><strong className="text-white">Legal Shot:</strong> Cue ball must first contact a ball of your own group (or any ball if table is open).</p>
               <p><strong className="text-white">Fouls:</strong></p>
@@ -345,9 +345,10 @@ function App() {
                 <li>Potting the cue ball (in-off)</li>
                 <li>Hitting opponent's ball first</li>
                 <li>No ball hitting a cushion after contact</li>
+                <li>Illegal break (nothing potted and fewer than 3 balls to a cushion)</li>
                 <li>Potting the 8-ball before clearing your group</li>
               </ul>
-              <p><strong className="text-white">Ball in Hand:</strong> After a foul, opponent gets cue ball in hand (place anywhere in baulk).</p>
+              <p><strong className="text-white">Ball in Hand:</strong> After a foul, opponent gets cue ball in hand (place anywhere behind the baulk line).</p>
               <p><strong className="text-white">8-Ball:</strong> Must be potted in a separate shot after clearing your group. Potting it early = loss.</p>
             </div>
             <button

@@ -1,15 +1,25 @@
 import * as THREE from 'three';
 import { Physics } from './Physics';
+import {
+  BAULK_D_RADIUS,
+  BAULK_LINE_X,
+  CENTRE_LINE_X,
+  FOOT_SPOT_X,
+  POCKETS,
+  PLAY_HALF_LENGTH,
+  PLAY_HALF_WIDTH,
+  TABLE,
+} from './TableSpec';
 
 export class Table {
   private scene: THREE.Scene;
   private tableGroup: THREE.Group;
-  private tableLength = 4.8;
-  private tableWidth = 2.4;
-  private tableHeight = 0.8;
-  private bedHeight = 0.05;
-  private cushionHeight = 0.08;
-  private pocketRadius = 0.12;
+  private tableLength = TABLE.length;
+  private tableWidth = TABLE.width;
+  private tableHeight = TABLE.bedTopY - TABLE.bedThickness / 2;
+  private bedHeight = TABLE.bedThickness;
+  private cushionHeight = TABLE.cushionHeight;
+  private pocketRadius = TABLE.pocketRadius;
 
   constructor(scene: THREE.Scene, _physics: Physics) {
     this.scene = scene;
@@ -224,57 +234,53 @@ export class Table {
   }
 
   private createMarkings() {
-    // Baulk line
-    const baulkLineGeometry = new THREE.PlaneGeometry(this.tableWidth - 0.1, 0.005);
     const markingMaterial = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       transparent: true,
       opacity: 0.3,
     });
+    const spotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const y = this.tableHeight + this.bedHeight / 2 + 0.001;
 
+    // Baulk line: across the width of the table, a quarter of the length in
+    // from the head rail (the +X end, where the cue ball breaks from).
+    const baulkLineGeometry = new THREE.PlaneGeometry(0.005, this.tableWidth - 0.1);
     const baulkLine = new THREE.Mesh(baulkLineGeometry, markingMaterial);
     baulkLine.rotation.x = -Math.PI / 2;
-    baulkLine.position.set(0, this.tableHeight + this.bedHeight / 2 + 0.001, 1.5);
+    baulkLine.position.set(BAULK_LINE_X, y, 0);
     this.tableGroup.add(baulkLine);
 
-    // D zone (semicircle)
-    const dGeometry = new THREE.RingGeometry(0.35, 0.36, 32, 1, 0, Math.PI);
+    // D zone: semicircle behind the baulk line, opening towards the foot of the table
+    const dGeometry = new THREE.RingGeometry(
+      BAULK_D_RADIUS,
+      BAULK_D_RADIUS + 0.01,
+      32,
+      1,
+      -Math.PI / 2,
+      Math.PI
+    );
     const dMarking = new THREE.Mesh(dGeometry, markingMaterial);
     dMarking.rotation.x = -Math.PI / 2;
-    dMarking.rotation.z = Math.PI;
-    dMarking.position.set(0, this.tableHeight + this.bedHeight / 2 + 0.001, 1.5);
+    dMarking.position.set(BAULK_LINE_X, y, 0);
     this.tableGroup.add(dMarking);
 
-    // Center spot
     const spotGeometry = new THREE.CircleGeometry(0.015, 16);
-    const spotMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+    // Center spot
     const centerSpot = new THREE.Mesh(spotGeometry, spotMaterial);
     centerSpot.rotation.x = -Math.PI / 2;
-    centerSpot.position.set(0, this.tableHeight + this.bedHeight / 2 + 0.001, 0);
+    centerSpot.position.set(CENTRE_LINE_X, y, 0);
     this.tableGroup.add(centerSpot);
 
-    // Eight-ball spot
-    const eightSpot = new THREE.Mesh(spotGeometry, spotMaterial);
-    eightSpot.rotation.x = -Math.PI / 2;
-    eightSpot.position.set(0, this.tableHeight + this.bedHeight / 2 + 0.001, -1.2);
-    this.tableGroup.add(eightSpot);
+    // Foot spot: apex ball of the rack, and where the 8-ball is re-spotted
+    const footSpot = new THREE.Mesh(spotGeometry, spotMaterial);
+    footSpot.rotation.x = -Math.PI / 2;
+    footSpot.position.set(FOOT_SPOT_X, y, 0);
+    this.tableGroup.add(footSpot);
   }
 
   getPocketPositions() {
-    const halfLength = this.tableLength / 2;
-    const halfWidth = this.tableWidth / 2;
-    const offset = 0.02;
-
-    return [
-      // Corner pockets
-      { x: -halfLength + offset, z: -halfWidth + offset },
-      { x: halfLength - offset, z: -halfWidth + offset },
-      { x: -halfLength + offset, z: halfWidth - offset },
-      { x: halfLength - offset, z: halfWidth - offset },
-      // Middle pockets
-      { x: 0, z: -halfWidth + offset },
-      { x: 0, z: halfWidth - offset },
-    ];
+    return POCKETS;
   }
 
   getTableHeight() {
@@ -283,10 +289,10 @@ export class Table {
 
   getBounds() {
     return {
-      minX: -this.tableLength / 2 + 0.05,
-      maxX: this.tableLength / 2 - 0.05,
-      minZ: -this.tableWidth / 2 + 0.05,
-      maxZ: this.tableWidth / 2 - 0.05,
+      minX: -PLAY_HALF_LENGTH,
+      maxX: PLAY_HALF_LENGTH,
+      minZ: -PLAY_HALF_WIDTH,
+      maxZ: PLAY_HALF_WIDTH,
     };
   }
 
