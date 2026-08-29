@@ -16,4 +16,10 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  server: {
+    host: true,
+    // Let the dev server answer on proxied/tunnelled hostnames (hosted preview
+    // URLs, ngrok, a phone on the LAN). Drop this if you only serve localhost.
+    allowedHosts: true,
+  },
 });
